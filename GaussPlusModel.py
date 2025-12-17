@@ -224,6 +224,6 @@ class GaussPlusModel:
             model_yields = np.vstack([self.yield_curve(maturities, x) for x in X])
             errors = Y - model_yields
             return np.sum(errors**2)
-        res = minimize(obj, np.array([self.mu]), method='L-BFGS-B', bounds=[(1e-6, 0.20)])
+        res = minimize(obj, np.array([self.mu]), method='L-BFGS-B', bounds=[(1e-6, None)])
         self.mu = round(res.x[0], 4)
         return self.mu
