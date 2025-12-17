@@ -171,7 +171,7 @@ class GaussPlusModel:
 
                 for tau in maturities:
                     U = self.upsilon(tau)      # (Υs, Υm, Υl)
-                    Ups_all.append(U[1:])      # keep (m, l)
+                    Ups_all.append(U[1:])      # (Ym, Yl)
 
                 for tau in tau_bench:
                     U = self.upsilon(tau)
