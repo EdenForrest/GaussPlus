@@ -6,7 +6,8 @@ class GaussPlusModel:
     Gauss+ (Gaussian Cascade) Term Structure Model
     =============================================
     
-    This class implements the Gauss+ model described in Appendix A9 of *Fixed Income Securities*. 
+    This class implements the Gauss+ model described in Appendix A9 of *FIXED INCOME SECURITIES Tools for Today's Markets
+    FOURTH EDITION by BRUCE TUCKMAN ANGEL SERRAT*. 
     The model is a three-factor Gaussian affine term structure model written in cascade form.
 
     Factors (cascade form)
@@ -42,7 +43,7 @@ class GaussPlusModel:
         self.Sigma = self._Sigma()
 
     # ------------------------------------------------------------------
-    # Core building blocks
+    # Building blocks
     # ------------------------------------------------------------------
     @staticmethod
     def B(tau, alpha):
@@ -131,7 +132,7 @@ class GaussPlusModel:
         return np.array([r_t, ml[0], ml[1]])
 
     # ------------------------------------------------------------------
-    # Convenience helpers
+    # Helpers
     # ------------------------------------------------------------------
     def yield_curve(self, taus, x):
         return np.array([self.zero_yield(tau, x) for tau in taus])
