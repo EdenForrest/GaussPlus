@@ -46,14 +46,9 @@ class GaussPlusModel:
     # Building blocks
     # ------------------------------------------------------------------
     @staticmethod
-    def B_yield(tau, alpha):
-        """ Yield loading: (1 - e^{-α·τ}) / (α·τ). Used in affine yield formulas. """
+    def B(tau, alpha):
+        """ Basis function B_i(tau) used in affine yield formulas. """
         return (1.0 - np.exp(-alpha * tau)) / (alpha * tau)
-
-    @staticmethod
-    def B_price(tau, alpha):
-        """ Price loading: (1 - e^{-α·τ}) / α. Used in convexity corrections. """
-        return (1.0 - np.exp(-alpha * tau)) / alpha
 
     def _A_inv(self):
         """ Compute A(alpha)^{-1}, the inverse of the cascade-to-reduced-form transformation matrix. """
@@ -76,38 +71,35 @@ class GaussPlusModel:
     def _Sigma(self):
         """ Covariance matrix of reduced-form factor innovations. """
         Om = self._Omega()
-        return self.Ainv @ Om @ Om.T @ self.Ainv.T
+        return self.Ainv @ Om @ Om.T @ self.Ainv
 
     # ------------------------------------------------------------------
     # Yield and forward loadings
     # ------------------------------------------------------------------
     def upsilon(self, tau):
         """ Yield loadings Upsilon(tau). """
-        Bvec = self.B_yield(tau, self.alpha)
+        Bvec = self.B(tau, self.alpha)
         return Bvec @ self.Ainv
 
     def upsilon_forward(self, tau, tau_p):
         """ Forward-rate loadings Upsilon'(tau, tau'). """
-        B1 = self.B_yield(tau + tau_p, self.alpha)
-        B0 = self.B_yield(tau, self.alpha)
+        B1 = self.B(tau + tau_p, self.alpha)
+        B0 = self.B(tau, self.alpha)
         return (B1 - B0) @ self.Ainv / tau_p
 
     # ------------------------------------------------------------------
     # Convexity corrections
     # ------------------------------------------------------------------
     def C(self, tau):
-        """
-        Convexity correction C(tau) for zero-coupon yields (Tuckman & Serrat A9).
-        C(τ) = -1/(2τ) · ∑ᵢⱼ Σᵢⱼ · b(τ,αᵢ) · b(τ,αⱼ)
-        where b(τ,α) = (1-e^{-ατ})/α is the price loading.
-        """
+        """ Convexity correction C(tau) for zero-coupon yields. """
         Cval = 0.0
         for i in range(3):
             for j in range(3):
-                bi = self.B_price(tau, self.alpha[i])
-                bj = self.B_price(tau, self.alpha[j])
-                Cval += self.Sigma[i, j] * bi * bj
-        return -0.5 / tau * Cval
+                ai, aj = self.alpha[i], self.alpha[j]
+                Bij = (1 - self.B(tau, ai) - self.B(tau, aj))
+                exp_term = (1 - np.exp(-(ai+aj)*tau)) / ((ai+aj)*tau)
+                Cval += (self.Sigma[i, j]/(2*ai*aj)) * (Bij - exp_term)
+        return Cval
 
     def C_forward(self, tau, tau_p):
         """ Convexity correction for forward rates. """
@@ -136,11 +128,7 @@ class GaussPlusModel:
         U = np.vstack([self.upsilon(tau) for tau in taus])
         Cvec = np.array([self.C(tau) for tau in taus])
         rhs = Y - (self.mu * (1 - U.sum(axis=1)) - Cvec + U[:, 0] * r_t)
-        A2 = U[:, 1:]
-        if np.linalg.cond(A2) > 1e10:
-            ml, *_ = np.linalg.lstsq(A2, rhs, rcond=None)
-        else:
-            ml = np.linalg.solve(A2, rhs)
+        ml = np.linalg.solve(U[:, 1:], rhs)
         return np.array([r_t, ml[0], ml[1]])
 
     # ------------------------------------------------------------------
@@ -172,20 +160,18 @@ class GaussPlusModel:
             )
 
             def objective(alpha_vec):
-                ar, am, al = alpha_vec
-                # Enforce αr > αm > αl > 0 so A_inv denominators are valid
-                if not (ar > am > al > 1e-6):
-                    return 1e10
-
+                # Update alpha and dependent matrices
                 self.alpha = alpha_vec
                 self.Ainv = self._A_inv()
 
+                # ----- Net out short-rate contribution -----
+                # Build reduced loadings (drop Υs)
                 Ups_all = []
                 Ups_b = []
 
                 for tau in maturities:
-                    U = self.upsilon(tau)
-                    Ups_all.append(U[1:])
+                    U = self.upsilon(tau)      # (Υs, Υm, Υl)
+                    Ups_all.append(U[1:])      # (Ym, Yl)
 
                 for tau in tau_bench:
                     U = self.upsilon(tau)
@@ -194,22 +180,20 @@ class GaussPlusModel:
                 Ups_all = np.asarray(Ups_all)  # N × 2
                 Ups_b = np.asarray(Ups_b)      # 2 × 2
 
-                if np.linalg.cond(Ups_b) > 1e10:
-                    return 1e10
-
+                # Invert benchmark loadings
                 Ups_b_inv = np.linalg.inv(Ups_b)
+
+                # Model-implied slopes: N × 2
                 model_slopes = Ups_all @ Ups_b_inv
 
+                # Match equation (A9.20)
                 return np.linalg.norm(model_slopes.T - beta_hat)
 
             # ---------- Optimization ----------
-            # Bounds: all α > 0; ordering enforced inside objective
-            bounds = [(1e-4, None), (1e-4, None), (1e-4, None)]
             res = minimize(
                 objective,
                 self.alpha,
-                method="L-BFGS-B",
-                bounds=bounds,
+                method="Nelder-Mead"
             )
 
             self.alpha = res.x
@@ -219,22 +203,14 @@ class GaussPlusModel:
 
 
     def calibrate_sigma(self, delta_yb):
-        """
-        Estimate sigma by matching model-implied annualized yield covariance matrix
-        to the realized covariance matrix of benchmark yield changes.
-        Both sides are 2×2 covariance matrices (not just diagonals).
-        """
-        T = delta_yb.shape[0]
-        # Annualized realized covariance matrix (2×2)
-        realized_cov = delta_yb.T @ delta_yb * 252 / T
-
+        """ Estimate the sigma parameters by matching model-implied variances. """
         def obj(sigma):
             self.sigma = sigma
             Om = self._Omega()
-            ups_b = np.vstack([self.upsilon(tau) for tau in [2, 10]])
-            # Instantaneous covariance in yield space; annualize by ×252
-            model_cov = ups_b @ Om @ Om.T @ ups_b.T * 252
-            return np.linalg.norm(model_cov - realized_cov)
+            ups_b = np.vstack([self.upsilon(tau) for tau in [2,10]])
+            model_implied_yield = ups_b @ Om @ Om.T @ ups_b.T
+            realized_volatilities_yields = np.diag(delta_yb.T @ delta_yb * 252 / delta_yb.shape[0])
+            return np.linalg.norm(model_implied_yield - realized_volatilities_yields)
 
         bounds = [(1e-6, None), (1e-6, None), (-0.999, 0.999)]
         res = minimize(obj, self.sigma, bounds=bounds, method="L-BFGS-B")
